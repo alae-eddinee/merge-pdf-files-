@@ -40,8 +40,9 @@ st.markdown("""
         font-size: 0.9rem;
     }
     .success-box {
-        background: #e8f5e9;
-        border-left: 4px solid #43a047;
+        background: #2e7d32;
+        color: #ffffff;
+        border-left: 4px solid #1b5e20;
         padding: 10px 14px;
         border-radius: 4px;
         margin: 6px 0;
