@@ -72,7 +72,7 @@ st.markdown("""
 # ── Header ───────────────────────────────────────────────────────────────────
 st.title("📄 COGEX PDF Tool")
 
-tab_split, tab_merge, tab_labels = st.tabs(["✂️ Split Pages", "🔀 Merge PDFs", "🏷️ Label Sheets (R1/R2)"])
+tab_labels, tab_split, tab_merge = st.tabs(["🏷️ Labels (ZIP / RAR)", "✂️ Split Pages", "🔀 Merge PDFs"])
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -474,136 +474,109 @@ with tab_merge:
         )
 
 # ════════════════════════════════════════════════════════════════════════════
-# TAB 3 — LABEL SHEETS (one PDF per label type, several labels per page)
+# TAB — LABELS: drop the ZIP / RAR as received, get one PDF per product
 # ════════════════════════════════════════════════════════════════════════════
 with tab_labels:
-    st.markdown("### 🏷️ Label Sheets → one PDF per product")
+    st.markdown("### 🏷️ COGEX Labels → one PDF per product")
     st.markdown(
-        "For batches delivered as **one PDF per label type** with several products on each page "
-        "(e.g. `R2 146 COGEX PDT 1.pdf`). Each label is cut out and, per product code, "
-        "the labels of every type are merged into one PDF."
+        "Drop the **ZIP or RAR exactly as you received it** (e.g. `PDF R2-146.rar`). "
+        "Nothing to rename or sort: each label is cut out automatically and, for every product code, "
+        "all its labels are merged into one PDF."
     )
-
-    st.markdown("**Merge order:**")
     tags3 = "".join(
         f'<span class="folder-tag">{i+1}. {t}</span>' for i, t in enumerate(label_sheets.TYPE_ORDER)
     )
-    st.markdown(tags3, unsafe_allow_html=True)
-    st.markdown("---")
-
-    st.markdown("""
-    <div class="info-box">
-        💡 <b>Upload</b> the <b>RAR</b> or <b>ZIP</b> you received (e.g. <code>PDF R2-146.rar</code>),
-        or the PDF files directly. Several batches can be uploaded together.<br><br>
-        File names must contain <code>COGEX</code> followed by the label type:
-        <code>PDT 1</code>, <code>PDT 2</code>, <code>INNER …</code>, <code>MASTER 1</code>, <code>MASTER 2 …</code>.
-        The text before <code>COGEX</code> (e.g. <code>R2 146</code>) is the batch name.<br><br>
-        📦 <b>Result:</b> <code>R2 146/37156.pdf</code> (all label types of product 37156, in the order above),
-        plus every single label under <code>R2 146/split/</code>.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("**Page order in each product PDF:** " + tags3, unsafe_allow_html=True)
 
     label_uploads = st.file_uploader(
-        "Upload RAR, ZIP or PDF files",
-        type=["rar", "zip", "pdf"],
+        "ZIP / RAR (or the PDFs themselves) — several batches at once is fine",
+        type=["zip", "rar", "pdf"],
         key="labels_uploader",
         accept_multiple_files=True,
     )
 
-    # Results are kept across reruns (download / preview clicks rerun the script).
+    # Process once per upload; keep the result across reruns (download / preview clicks).
     upload_sig = tuple((f.name, f.size) for f in label_uploads) if label_uploads else None
     if st.session_state.get("ls_sig") != upload_sig:
         st.session_state["ls_sig"] = upload_sig
         st.session_state.pop("ls_result", None)
-
-    label_pdfs: dict[str, bytes] = {}
-    if label_uploads:
-        for up in label_uploads:
-            try:
-                label_pdfs.update(label_sheets.extract_pdfs(up.name, up.getvalue()))
-            except Exception as e:
-                st.markdown(f'<div class="warn-box">⚠️ <b>{up.name}</b>: {e}</div>', unsafe_allow_html=True)
-
-        recognised = {n: label_sheets.classify_filename(n) for n in label_pdfs}
-        ok = {n: c for n, c in recognised.items() if c}
-        if ok:
-            st.success(f"✅ Found {len(ok)} label PDF(s)")
-            by_batch: dict[str, list[tuple[str, str]]] = defaultdict(list)
-            for n, (batch, typ) in ok.items():
-                by_batch[batch].append((typ, n.split("/")[-1]))
-            for batch, items in by_batch.items():
-                types = {t for t, _ in items}
-                missing = [t for t in label_sheets.TYPE_ORDER if t not in types]
-                title = f"📁 {batch} ({len(items)} files)" + (f" — missing: {', '.join(missing)}" if missing else "")
-                with st.expander(title):
-                    for typ, name in sorted(items, key=lambda x: label_sheets.TYPE_ORDER.index(x[0])):
-                        st.markdown(f"- **{typ}** — `{name}`")
-        ignored = [n for n, c in recognised.items() if not c]
-        if ignored:
-            st.markdown(
-                '<div class="warn-box">⚠️ Ignored (name not recognised as a COGEX label file): '
-                + ", ".join(f"<code>{n}</code>" for n in ignored) + "</div>",
-                unsafe_allow_html=True,
-            )
-        if not label_pdfs:
-            st.warning("No PDF files found in the upload.")
-
-    if label_pdfs and any(label_sheets.classify_filename(n) for n in label_pdfs):
-        if st.button("🏷️ Cut & Merge Labels", type="primary", width="stretch"):
-            with st.spinner("Detecting labels and building PDFs…"):
-                files, _skipped = label_sheets.process(label_pdfs)
-                zip_bytes, coverage = label_sheets.build_outputs(files)
-            st.session_state["ls_result"] = {"files": files, "zip": zip_bytes, "coverage": coverage}
+        if label_uploads:
+            errors, label_pdfs = [], {}
+            with st.spinner("Reading the files, cutting labels and building the product PDFs…"):
+                for up in label_uploads:
+                    try:
+                        label_pdfs.update(label_sheets.extract_pdfs(up.name, up.getvalue()))
+                    except Exception as e:
+                        errors.append(f"<b>{up.name}</b>: {e}")
+                files, skipped = label_sheets.process(label_pdfs)
+                zip_bytes, coverage = label_sheets.build_outputs(files) if files else (b"", {})
+            st.session_state["ls_result"] = {
+                "files": files, "skipped": skipped, "errors": errors,
+                "zip": zip_bytes, "coverage": coverage, "n_pdfs": len(label_pdfs),
+            }
 
     result = st.session_state.get("ls_result")
     if result:
-        files = result["files"]
-        coverage = result["coverage"]
+        files, coverage = result["files"], result["coverage"]
+        for err in result["errors"]:
+            st.markdown(f'<div class="warn-box">⚠️ {err}</div>', unsafe_allow_html=True)
 
-        for f in sorted(files, key=lambda f: (f.batch, label_sheets.TYPE_ORDER.index(f.type))):
-            by_pos = sum(1 for l in f.labels if l.code_source == "position")
-            note = f" (codes matched by position: {by_pos})" if by_pos else ""
-            if f.labels:
-                st.markdown(
-                    f'<div class="success-box">✅ <b>{f.name}</b> → {len(f.labels)} label(s){note}</div>',
-                    unsafe_allow_html=True,
-                )
-            for w in f.warnings:
-                st.markdown(f'<div class="warn-box">⚠️ <b>{f.name}</b>: {w}</div>', unsafe_allow_html=True)
+        if not coverage:
+            st.error(
+                "No COGEX labels found in this upload."
+                + (" The archive contained no PDF files." if not result["n_pdfs"] else "")
+            )
+        else:
+            total = sum(len(c) for c in coverage.values())
+            incomplete = sum(
+                1 for codes in coverage.values() for present in codes.values()
+                if len(present) < len(label_sheets.TYPE_ORDER)
+            )
+            batches = list(coverage)
+            st.markdown(
+                f'<div class="success-box">✅ <b>{total} product PDF(s)</b> ready — '
+                + " · ".join(f"{b}: {len(coverage[b])} products" for b in batches) + "</div>",
+                unsafe_allow_html=True,
+            )
+            if incomplete:
+                st.warning(f"⚠️ {incomplete} product(s) are missing a label type — see ❌ in the table below.")
+            all_warnings = [(f.name, w) for f in files for w in f.warnings]
+            for name, w in all_warnings:
+                st.markdown(f'<div class="warn-box">⚠️ <b>{name}</b>: {w}</div>', unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("#### 📋 Products found")
-        incomplete = 0
-        for batch, codes in coverage.items():
-            rows = []
-            for code, present in codes.items():
-                row = {"Code": code}
-                for t in label_sheets.TYPE_ORDER:
-                    row[t] = "✅" if t in present else "❌"
-                incomplete += len(present) < len(label_sheets.TYPE_ORDER)
-                rows.append(row)
-            st.markdown(f"**{batch}** — {len(codes)} product(s)")
-            st.dataframe(rows, hide_index=True, width="stretch")
-        if incomplete:
-            st.warning(f"⚠️ {incomplete} product(s) are missing at least one label type (❌ above).")
+            st.download_button(
+                label="📦 Download all product PDFs (ZIP)",
+                data=result["zip"],
+                file_name=f"COGEX_labels_{'_'.join(b.replace(' ', '-') for b in batches)}.zip",
+                mime="application/zip",
+                type="primary",
+                width="stretch",
+            )
 
-        st.markdown("#### 🔍 Preview")
-        choices = {f"{b} — {c}": (b, c) for b, codes in coverage.items() for c in codes}
-        if choices:
+            st.markdown("#### 🔍 Check a product")
+            choices = {f"{b} — {c}": (b, c) for b, codes in coverage.items() for c in codes}
             pick = choices[st.selectbox("Product", list(choices), key="ls_preview")]
             previews = label_sheets.render_preview(files, pick[0], pick[1])
             cols = st.columns(len(previews) or 1)
             for col, (typ, png) in zip(cols, previews):
                 col.image(png, caption=typ, width="stretch")
 
-        st.markdown("---")
-        total = sum(len(c) for c in coverage.values())
-        st.success(f"✅ {total} product PDF(s) ready.")
-        batches = list(coverage)
-        st.download_button(
-            label="📦 Download Labels as ZIP",
-            data=result["zip"],
-            file_name=f"COGEX_labels_{'_'.join(b.replace(' ', '-') for b in batches)}.zip",
-            mime="application/zip",
-            width="stretch",
-        )
+            with st.expander("📋 All products and label types"):
+                for batch, codes in coverage.items():
+                    rows = [
+                        {"Code": code, **{t: ("✅" if t in present else "❌") for t in label_sheets.TYPE_ORDER}}
+                        for code, present in codes.items()
+                    ]
+                    st.markdown(f"**{batch}** — {len(codes)} product(s)")
+                    st.dataframe(rows, hide_index=True, width="stretch")
+
+            with st.expander("📄 Files read"):
+                for f in sorted(files, key=lambda f: (f.batch, label_sheets.TYPE_ORDER.index(f.type))):
+                    by_pos = sum(1 for l in f.labels if l.code_source == "position")
+                    note = f" — codes matched by position" if by_pos else ""
+                    st.markdown(f"- **{f.batch} · {f.type}** — `{f.name}` → {len(f.labels)} label(s){note}")
+                for n in result["skipped"]:
+                    st.markdown(f"- ⏭️ `{n.split('/')[-1]}` — not a COGEX label sheet, skipped")
+                st.caption(
+                    "The ZIP also contains every single label under <batch>/split/, one folder per label type."
+                )

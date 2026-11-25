@@ -59,6 +59,54 @@ def classify_filename(filename: str) -> tuple[str, str] | None:
     return batch, typ
 
 
+def detect_type(data: bytes) -> str | None:
+    """Recognise the label type from what is printed on it, whatever the file is called."""
+    doc = pymupdf.open(stream=data, filetype="pdf")
+    try:
+        if not doc.page_count:
+            return None
+        spans = _spans(doc[0])
+    finally:
+        doc.close()
+    text = " ".join(t for t, _r in spans).upper()
+    if "CARTON NUMBER" in text:
+        return "MASTER 2"
+    if "PCS/OUTER" in text:
+        return "MASTER 1"
+    if "PCS/INNER" in text:
+        return "INNER"
+    tokens = [t.replace(" ", "") for t, _r in spans]
+    if any(_EAN_RE.match(t) for t in tokens):
+        return "PDT 2"   # product sticker: only the barcode digits are text
+    if any(_ORDER_RE.match(t) for t in tokens):
+        return "PDT 1"   # order-number sticker
+    return None
+
+
+def _clean_batch(name: str) -> str:
+    """'PDF R2-146' -> 'R2-146'."""
+    cleaned = re.sub(r"(?i)\bpdfs?\b", "", name).strip(" -_.")
+    return cleaned or name.strip() or "Labels"
+
+
+def classify(path: str, data: bytes) -> tuple[str, str] | None:
+    """
+    (batch, type) for one PDF, or None if it is not a COGEX label sheet.
+    Type comes from the content (file name as fallback).  Batch comes from the
+    file name ('R2 146 COGEX …'), else the folder / archive it was in.
+    """
+    by_name = classify_filename(path)
+    typ = detect_type(data) or (by_name[1] if by_name else None)
+    if typ is None:
+        return None
+    if by_name and by_name[0] != "Batch":
+        batch = by_name[0]
+    else:
+        folders = [p for p in path.replace("\\", "/").split("/")[:-1] if p]
+        batch = _clean_batch(folders[-1]) if folders else "Labels"
+    return batch, typ
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Archive extraction (ZIP / RAR)
 # ════════════════════════════════════════════════════════════════════════════
@@ -116,19 +164,26 @@ def _read_pdfs_in(folder: str) -> dict[str, bytes]:
 
 
 def extract_pdfs(filename: str, data: bytes) -> dict[str, bytes]:
-    """Return {path: pdf bytes} for an uploaded PDF, ZIP or RAR."""
+    """
+    Return {path: pdf bytes} for an uploaded PDF, ZIP or RAR.  Paths inside an
+    archive are prefixed with the archive name, so 'PDF R2-146.zip' gives the
+    batch name 'R2-146' when the PDFs themselves don't carry one.
+    """
     low = filename.lower()
+    stem = os.path.splitext(os.path.basename(filename))[0]
     if low.endswith(".pdf"):
         return {filename: data}
     if low.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            return {
+            inner = {
                 n: zf.read(n) for n in zf.namelist()
                 if n.lower().endswith(".pdf") and not n.endswith("/") and "__MACOSX" not in n
             }
-    if low.endswith(".rar"):
-        return _extract_rar(data)
-    return {}
+    elif low.endswith(".rar"):
+        inner = _extract_rar(data)
+    else:
+        return {}
+    return {f"{stem}/{n}": d for n, d in inner.items()}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -436,12 +491,22 @@ def render_preview(files: list[LabelFile], batch: str, code: str, dpi: int = 70)
 def process(pdfs: dict[str, bytes]) -> tuple[list[LabelFile], list[str]]:
     """Classify and analyse uploaded PDFs. Returns (label files, names that were skipped)."""
     files, skipped = [], []
-    for name, data in pdfs.items():
-        cls = classify_filename(name)
+    seen: dict[tuple[str, str], str] = {}
+    for name, data in sorted(pdfs.items()):
+        try:
+            cls = classify(name, data)
+        except Exception:  # not a readable PDF
+            cls = None
         if cls is None:
             skipped.append(name)
             continue
         lf = LabelFile(name=os.path.basename(name), batch=cls[0], type=cls[1], data=data)
+        if cls in seen:
+            lf.warnings.append(
+                f"Batch '{lf.batch}' already has a {lf.type} file ({seen[cls]}); "
+                "both are included, so these products get two labels of this type."
+            )
+        seen.setdefault(cls, lf.name)
         try:
             detect_labels(lf)
         except Exception as e:  # damaged PDF etc.
