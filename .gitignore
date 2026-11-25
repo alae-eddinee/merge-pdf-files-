@@ -1,0 +1,4 @@
+*.rar
+*.pdf
+__pycache__/
+.venv/
